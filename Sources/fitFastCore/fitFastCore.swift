@@ -47,13 +47,35 @@ public actor FitFastAPIClient {
                 session: URLSession = .shared) {
         self.baseURL = baseURL
         self.session = session
-        self.decoder = JSONDecoder()
+        let decoder = JSONDecoder()
+        decoder.dateDecodingStrategy = .iso8601
+        self.decoder = decoder
     }
 
     // MARK: API Models
     private struct TokenResponse: Decodable { let token: String }
     private struct CreateUserBody: Encodable { let email: String; let name: String; let password: String }
-    private struct CreateRunPostBody: Encodable { let name: String; let description: String; let distance: Double; let minutes: Int; let seconds: Int, timestamp: String }
+    
+    private struct LocationPoint: Codable {
+        let latitude: Double
+        let longitude: Double
+        let timestamp: String
+    }
+    
+    struct PacePoint: Codable {
+        let timestamp: String
+        let pace: Double
+    }
+    private struct CreateRunPostBody: Encodable {
+        let name: String
+        let description: String
+        let distance: Double
+        let minutes: Int
+        let seconds: Int
+        let timestamp: String
+        let locations: [LocationPoint]?
+        let paceData: [PacePoint]?
+    }
 
     // MARK: - Public API
 
@@ -110,21 +132,31 @@ public actor FitFastAPIClient {
 
         let (dataResp, response) = try await self.session.data(for: request)
         guard let http = response as? HTTPURLResponse, 200..<300 ~= http.statusCode else {
+            let body = String(data: dataResp, encoding: .utf8) ?? ""
+            print("getRuns failed: status \((response as? HTTPURLResponse)?.statusCode ?? -1) body: \(body)")
             throw URLError(.badServerResponse)
         }
 
-        return try self.decoder.decode([Run].self, from: dataResp)
+        do {
+            return try self.decoder.decode([Run].self, from: dataResp)
+        } catch {
+            print("getRuns decode error:", error)
+            print(String(data: dataResp, encoding: .utf8) ?? "<non-utf8>")
+            throw error
+        }
     }
     
     public func postRun(name: String, description: String, distance: Double, minutes: Int, seconds: Int) async throws -> Bool {
         var request = URLRequest(url: self.baseURL.appendingPathComponent("api/postRun"))
         request.httpMethod = "POST"
         request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        guard let token = self.authToken else { throw URLError(.userAuthenticationRequired) }
+        request.setValue(token, forHTTPHeaderField: "Authorization")
 
         let formatter = ISO8601DateFormatter()
         formatter.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
 
-        let body = CreateRunPostBody(name: name, description: description, distance: distance, minutes: minutes, seconds: seconds, timestamp: formatter.string(from: Date()))
+        let body = CreateRunPostBody(name: name, description: description, distance: distance, minutes: minutes, seconds: seconds, timestamp: formatter.string(from: Date()), locations: nil, paceData: nil)
         request.httpBody = try JSONEncoder().encode(body)
 
         let (dataResp, response) = try await self.session.data(for: request)
@@ -138,9 +170,32 @@ public actor FitFastAPIClient {
         }
         return true
     }
+    
+    public func delRun(runID: Int) async throws -> Bool {
+        var request = URLRequest(url: self.baseURL.appendingPathComponent("api/run/\(runID)"))
+        request.httpMethod = "DELETE"
+        request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        guard let token = self.authToken else { throw URLError(.userAuthenticationRequired) }
+        request.setValue(token, forHTTPHeaderField: "Authorization")
+
+        let (dataResp, response) = try await self.session.data(for: request)
+        guard let http = response as? HTTPURLResponse, 200..<300 ~= http.statusCode else {
+            throw URLError(.badServerResponse)
+        }
+
+        struct Status: Decodable { let success: Bool }
+        if let status = try? JSONDecoder().decode(Status.self, from: dataResp) {
+            return true
+        } else {
+            return false
+        }
+        
+        return true
+    }
 
     /// Logout
     public func logout() {
         self.authToken = nil
     }
 }
+
